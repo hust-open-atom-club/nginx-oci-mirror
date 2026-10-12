@@ -23,8 +23,8 @@ func nginxConfig(dir string) error {
 	if err != nil {
 		return err
 	}
-	if strings.ContainsAny(dir, "\r\n") {
-		return errors.New("nginx root cannot contain newlines")
+	if strings.ContainsAny(dir, "$\r\n") {
+		return errors.New("nginx root cannot contain '$' or newlines")
 	}
 	path := filepath.Join(dir, "nginx.conf")
 	if data, err := os.ReadFile(path); err == nil {
@@ -40,7 +40,12 @@ func nginxConfig(dir string) error {
 pid /tmp/nginx-oci-mirror.pid;
 events {}
 http {
-    access_log /dev/stdout;
+    access_log off;
+    client_body_temp_path /tmp/nginx-oci-mirror-body;
+    proxy_temp_path /tmp/nginx-oci-mirror-proxy;
+    fastcgi_temp_path /tmp/nginx-oci-mirror-fastcgi;
+    uwsgi_temp_path /tmp/nginx-oci-mirror-uwsgi;
+    scgi_temp_path /tmp/nginx-oci-mirror-scgi;
     types {}
     default_type application/octet-stream;
     server {
@@ -58,7 +63,7 @@ http {
             add_header Docker-Content-Digest $1;
             try_files $uri =404;
         }
-`, strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(filepath.ToSlash(dir)))
+`, strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(filepath.ToSlash(dir)))
 	err = filepath.WalkDir(filepath.Join(dir, "v2"), func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || entry.Name() != ".metadata.json" {
 			return err
