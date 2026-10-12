@@ -136,6 +136,19 @@ func TestMirror(t *testing.T) {
 			if !strings.Contains(string(config), "/manifests/second {") || !strings.Contains(string(config), "/manifests/v1.json {") {
 				t.Fatal("import did not preserve both tags")
 			}
+			for _, directive := range []string{"events {", "http {", "server {", "listen ", "pid ", "access_log ", "error_log "} {
+				if strings.Contains(string(config), directive) {
+					t.Fatalf("fragment contains host directive %q", directive)
+				}
+			}
+			customPath := filepath.Join(t.TempDir(), "includes", "registry.conf")
+			if err := run(t.Context(), []string{"--nginx-config", customPath, ref.String(), dir}); err != nil {
+				t.Fatal(err)
+			}
+			custom, err := os.ReadFile(customPath)
+			if err != nil || !bytes.Equal(custom, config) {
+				t.Fatalf("custom fragment differs from default: %v", err)
+			}
 			if err := os.WriteFile(layerPath, []byte("corrupt"), 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -154,7 +167,7 @@ func TestMirror(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "nginx.conf"), []byte("user config"), 0644); err != nil {
 				t.Fatal(err)
 			}
-			if err := nginxConfig(dir); err == nil {
+			if err := nginxConfig(dir, filepath.Join(dir, "nginx.conf")); err == nil {
 				t.Fatal("overwrote user nginx config")
 			}
 		})

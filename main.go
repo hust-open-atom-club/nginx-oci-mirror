@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -14,16 +15,17 @@ import (
 
 func run(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("tool", flag.ContinueOnError)
-	nginx := flags.Bool("nginx", false, "generate nginx.conf in the output directory (Linux, port 8080)")
+	nginx := flags.Bool("nginx", false, "generate a server include fragment at DIRECTORY/nginx.conf")
+	nginxPath := flags.String("nginx-config", "", "generate a server include fragment at this path")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: tool [--nginx] IMAGE DIRECTORY")
+		fmt.Fprintln(flags.Output(), "Usage: tool [--nginx] [--nginx-config PATH] IMAGE DIRECTORY")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 2 {
-		return errors.New("usage: tool [--nginx] IMAGE DIRECTORY")
+		return errors.New("usage: tool [--nginx] [--nginx-config PATH] IMAGE DIRECTORY")
 	}
 	ref, err := name.ParseReference(flags.Arg(0))
 	if err != nil {
@@ -32,8 +34,11 @@ func run(ctx context.Context, args []string) error {
 	if err := download(ctx, ref, flags.Arg(1)); err != nil {
 		return err
 	}
-	if *nginx {
-		if err := nginxConfig(flags.Arg(1)); err != nil {
+	if *nginx || *nginxPath != "" {
+		if *nginxPath == "" {
+			*nginxPath = filepath.Join(flags.Arg(1), "nginx.conf")
+		}
+		if err := nginxConfig(flags.Arg(1), *nginxPath); err != nil {
 			return err
 		}
 	}
