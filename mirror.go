@@ -35,6 +35,7 @@ func validReference(repo, ref string) bool {
 }
 
 func download(ctx context.Context, ref name.Reference, dir string) error {
+	// shortcut: imports into one directory must run serially; add a lock for concurrent writers.
 	if !validReference(ref.Context().RepositoryStr(), ref.Identifier()) {
 		return fmt.Errorf("invalid repository or reference: %s", ref)
 	}
