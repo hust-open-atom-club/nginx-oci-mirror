@@ -149,6 +149,7 @@ func TestMirror(t *testing.T) {
 			if err != nil || !bytes.Equal(custom, config) {
 				t.Fatalf("custom fragment differs from default: %v", err)
 			}
+			testNginxInclude(t, dir, customPath, headers[ref.Identifier()], layerDesc)
 			if err := os.WriteFile(layerPath, []byte("corrupt"), 0644); err != nil {
 				t.Fatal(err)
 			}
