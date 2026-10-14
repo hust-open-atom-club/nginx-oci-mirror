@@ -25,6 +25,25 @@ go build -o tool .
 
 私有源 Registry 使用已有的 Docker 登录凭据及 credential helper，例如先执行 `docker login ghcr.io`。工具不会把源 Registry 的凭据写入输出目录。
 
+## 从配置文件批量下载
+
+创建 `images.txt`，每行一个镜像，顺序即下载顺序：
+
+```text
+alpine:latest
+busybox:latest
+ghcr.io/owner/image:v1
+```
+
+```sh
+./tool --image-file images.txt ./mirror
+./tool --image-file images.txt --nginx-config ./nginx/oci-registry.conf ./mirror
+```
+
+`--image-file` 模式只接收一个目标目录参数，不能再指定单个镜像。支持 LF / CRLF，忽略行首尾空白、空行及整行 `#` 注释；镜像名称、tag 和 digest 的规则与单镜像模式相同。
+
+工具先校验整个文件，无效镜像会报告文件名和行号，空文件也会报错。校验通过后依次下载，任一下载失败就停止，已成功下载的镜像会保留，再次运行可复用缓存。若同时启用 `--nginx` 或 `--nginx-config`，只在全部镜像下载成功后统一生成配置；失败时保留原配置。
+
 ## 生成 Nginx 配置模块
 
 ```sh
@@ -106,7 +125,7 @@ staticcheck ./...
 deadcode ./...
 ```
 
-测试使用本地 HTTP Registry，覆盖 Docker / OCI 的嵌套 index、按 digest 导入、多 tag 保留、默认和指定路径的模块生成、缓存复用、损坏缓存修复和失败时保护已有文件。
+测试使用本地 HTTP Registry，覆盖 Docker / OCI 的嵌套 index、按 digest 导入、多 tag 保留、批量顺序与错误停止、文件预校验、默认和指定路径的模块生成、缓存复用、损坏缓存修复和失败时保护已有文件。
 
 指定实际 Nginx 二进制可以额外验证模块在已有 `server` 中的行为：
 
