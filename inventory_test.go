@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,7 +91,7 @@ func TestNginxInventoryUsesCompleteDiskGraphs(t *testing.T) {
 				t.Fatal(err)
 			}
 			config := filepath.Join(dir, "nginx.conf")
-			if err := nginxConfig(dir, config); err != nil {
+			if err := nginxConfig(t.Context(), dir, config, defaultParallelVerify); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(config)
@@ -138,7 +139,7 @@ func TestNginxInventoryDoesNotDependOnMetadata(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			inventory, err := localManifests(dir)
+			inventory, err := localManifests(t.Context(), dir, defaultParallelVerify, io.Discard)
 			if err != nil {
 				t.Fatal(err)
 			}

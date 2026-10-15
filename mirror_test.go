@@ -168,7 +168,7 @@ func TestMirror(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "nginx.conf"), []byte("user config"), 0644); err != nil {
 				t.Fatal(err)
 			}
-			if err := nginxConfig(dir, filepath.Join(dir, "nginx.conf")); err == nil {
+			if err := nginxConfig(t.Context(), dir, filepath.Join(dir, "nginx.conf"), defaultParallelVerify); err == nil {
 				t.Fatal("overwrote user nginx config")
 			}
 		})

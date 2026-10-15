@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
@@ -18,10 +20,39 @@ import (
 // The files on disk are authoritative. Metadata is only a media-type hint for
 // older manifests that omit mediaType; missing or stale metadata cannot hide a
 // valid image or make a broken dependency graph publishable.
-func localManifests(dir string) (map[string]map[string]v1.Descriptor, error) {
+func localManifests(ctx context.Context, dir string, workers int, progress io.Writer) (map[string]map[string]v1.Descriptor, error) {
+	return (&localScan{}).manifests(ctx, dir, workers, progress)
+}
+
+func (scan *localScan) manifests(ctx context.Context, dir string, workers int, progress io.Writer) (result map[string]map[string]v1.Descriptor, err error) {
+	if workers < 1 || workers > maxParallelVerify {
+		return nil, fmt.Errorf("parallel verification must be between 1 and %d", maxParallelVerify)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	scan.blobs = make(map[string]*localBlob)
+	scan.jobs = nil
+	scan.discovered.Store(0)
+	scan.checked.Store(0)
+	scan.bytes.Store(0)
+	started := time.Now()
+	stopProgress := scan.progress(progress, workers)
+	defer func() {
+		stopProgress()
+		status := "finished"
+		if err != nil {
+			status = "stopped"
+		}
+		fmt.Fprintf(progress, "Local verification %s: %d/%d blobs, %.1f MiB read, %s\n", status,
+			scan.checked.Load(), scan.discovered.Load(), float64(scan.bytes.Load())/(1<<20), time.Since(started).Round(time.Millisecond))
+	}()
 	root := filepath.Join(dir, "v2")
 	files := make(map[string][]string)
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return err
 		}
@@ -46,8 +77,16 @@ func localManifests(dir string) (map[string]map[string]v1.Descriptor, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := make(map[string]map[string]v1.Descriptor)
+	type candidate struct {
+		repo, ref, path string
+		desc            v1.Descriptor
+		node            *localManifest
+	}
+	var candidates []candidate
 	for repo, refs := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		manifestDir := filepath.Join(root, filepath.FromSlash(repo), "manifests")
 		hints := make(map[string]v1.Descriptor)
 		metadata := filepath.Join(manifestDir, ".metadata.json")
@@ -60,22 +99,42 @@ func localManifests(dir string) (map[string]map[string]v1.Descriptor, error) {
 				fmt.Fprintf(os.Stderr, "ignoring invalid manifest metadata %s: %v\n", metadata, err)
 			}
 		}
-		validator := localValidator{dir: dir, repo: repo, checked: make(map[string]error), visiting: make(map[string]bool), blobs: make(map[string]bool)}
+		validator := localValidator{ctx: ctx, dir: dir, repo: repo, checked: make(map[string]*localManifest), visiting: make(map[string]bool), scan: scan}
 		for _, ref := range refs {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			path := filepath.Join(manifestDir, ref)
 			desc, err := localDescriptor(dir, path, ref, hints[ref])
+			node := &localManifest{err: err}
 			if err == nil {
-				err = validator.manifest(desc)
+				node = validator.manifest(desc)
 			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "skipping invalid local manifest %s: %v\n", path, err)
-				continue
-			}
-			if result[repo] == nil {
-				result[repo] = make(map[string]v1.Descriptor)
-			}
-			result[repo][ref] = desc
+			candidates = append(candidates, candidate{repo, ref, path, desc, node})
 		}
+	}
+	// Discover all independent files first so one global bounded pool can keep
+	// busy across repositories, nested indexes, and single-layer manifests.
+	if err := runLocalBlobChecks(ctx, scan.jobs, workers, func(ctx context.Context, blob *localBlob) error {
+		err := scan.verifyBlob(ctx, dir, blob)
+		scan.checked.Add(1)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	result = make(map[string]map[string]v1.Descriptor)
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := candidate.node.validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "skipping invalid local manifest %s: %v\n", candidate.path, err)
+			continue
+		}
+		if result[candidate.repo] == nil {
+			result[candidate.repo] = make(map[string]v1.Descriptor)
+		}
+		result[candidate.repo][candidate.ref] = candidate.desc
 	}
 	return result, nil
 }
@@ -132,27 +191,64 @@ func localDescriptor(root, path, ref string, hint v1.Descriptor) (v1.Descriptor,
 	return desc, nil
 }
 
-type localValidator struct {
-	dir      string
-	repo     string
-	checked  map[string]error
-	visiting map[string]bool
-	blobs    map[string]bool
+// Graph discovery is serial. Workers only fill localBlob.err, and graph
+// completeness is evaluated after they have all joined.
+type localManifest struct {
+	err       error
+	validated bool
+	children  []*localManifest
+	blobs     []*localBlob
 }
 
-func (v *localValidator) manifest(desc v1.Descriptor) (err error) {
+func (node *localManifest) validate() error {
+	if node.validated || node.err != nil {
+		return node.err
+	}
+	node.validated = true
+	for _, child := range node.children {
+		if err := child.validate(); err != nil {
+			node.err = err
+			return err
+		}
+	}
+	for _, blob := range node.blobs {
+		if blob.err != nil {
+			node.err = fmt.Errorf("missing or corrupt blob %s: %w", blob.desc.Digest, blob.err)
+			return node.err
+		}
+	}
+	return nil
+}
+
+type localValidator struct {
+	ctx      context.Context
+	dir      string
+	repo     string
+	checked  map[string]*localManifest
+	visiting map[string]bool
+	scan     *localScan
+}
+
+func (v *localValidator) manifest(desc v1.Descriptor) *localManifest {
 	key := fmt.Sprintf("%s/%d/%s", desc.Digest, desc.Size, desc.MediaType)
-	if result, ok := v.checked[key]; ok {
-		return result
-	}
 	if v.visiting[desc.Digest.String()] {
-		return fmt.Errorf("manifest cycle at %s", desc.Digest)
+		return &localManifest{err: fmt.Errorf("manifest cycle at %s", desc.Digest)}
 	}
+	if previous, ok := v.checked[key]; ok {
+		return previous
+	}
+	node := &localManifest{}
+	v.checked[key] = node
 	v.visiting[desc.Digest.String()] = true
-	defer func() {
-		delete(v.visiting, desc.Digest.String())
-		v.checked[key] = err
-	}()
+	defer delete(v.visiting, desc.Digest.String())
+	node.err = v.discover(desc, node)
+	return node
+}
+
+func (v *localValidator) discover(desc v1.Descriptor, node *localManifest) error {
+	if err := v.ctx.Err(); err != nil {
+		return err
+	}
 	path := filepath.Join(v.dir, "v2", filepath.FromSlash(v.repo), "manifests", desc.Digest.String())
 	if err := safeMirrorFile(v.dir, path); err != nil {
 		return err
@@ -169,23 +265,11 @@ func (v *localValidator) manifest(desc v1.Descriptor) (err error) {
 		return err
 	}
 	for _, child := range doc.Manifests {
-		if err := v.manifest(child); err != nil {
-			return fmt.Errorf("child %s: %w", child.Digest, err)
-		}
+		node.children = append(node.children, v.manifest(child))
 	}
-	for _, blob := range doc.blobs() {
-		key := fmt.Sprintf("%s/%d", blob.Digest, blob.Size)
-		if v.blobs[key] {
-			continue
-		}
-		path := filepath.Join(v.dir, "v2", filepath.FromSlash(v.repo), "blobs", blob.Digest.String())
-		if err := safeMirrorFile(v.dir, path); err != nil {
-			return err
-		}
-		if !validContent(path, blob) {
-			return fmt.Errorf("missing or corrupt blob %s", blob.Digest)
-		}
-		v.blobs[key] = true
+	for _, desc := range doc.blobs() {
+		path := filepath.Join(v.dir, "v2", filepath.FromSlash(v.repo), "blobs", desc.Digest.String())
+		node.blobs = append(node.blobs, v.scan.blob(path, desc))
 	}
 	return nil
 }

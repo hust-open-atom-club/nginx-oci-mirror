@@ -18,6 +18,7 @@ func run(ctx context.Context, args []string) error {
 	nginx := flags.Bool("nginx", false, "generate a server include fragment at DIRECTORY/nginx.conf")
 	nginxPath := flags.String("nginx-config", "", "generate a server include fragment at this path")
 	parallel := flags.Int("parallel-downloads", 1, "maximum simultaneous blob file downloads (1-128)")
+	verify := flags.Int("parallel-verify", defaultParallelVerify, "maximum simultaneous local blob verifications for nginx (1-32)")
 	imageFile := flags.String("image-file", "", "download images listed one per line in this file")
 	const usage = "tool [OPTIONS] IMAGE DIRECTORY\n       tool [OPTIONS] --image-file PATH DIRECTORY"
 	flags.Usage = func() {
@@ -29,6 +30,9 @@ func run(ctx context.Context, args []string) error {
 	}
 	if *parallel < 1 || *parallel > maxParallelDownloads {
 		return fmt.Errorf("parallel downloads must be between 1 and %d", maxParallelDownloads)
+	}
+	if *verify < 1 || *verify > maxParallelVerify {
+		return fmt.Errorf("parallel verification must be between 1 and %d", maxParallelVerify)
 	}
 	var refs []name.Reference
 	var dir string
@@ -71,9 +75,12 @@ func run(ctx context.Context, args []string) error {
 		if *nginxPath == "" {
 			*nginxPath = filepath.Join(dir, "nginx.conf")
 		}
-		if err := nginxConfig(dir, *nginxPath); err != nil {
+		if err := nginxConfig(ctx, dir, *nginxPath, *verify); err != nil {
 			failures = append(failures, err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
 }
