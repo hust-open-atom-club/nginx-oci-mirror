@@ -67,7 +67,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("Saved %s to %s\n", ref, dir)
 	}
-	if *nginx || *nginxPath != "" {
+	if ctx.Err() == nil && (*nginx || *nginxPath != "") {
 		if *nginxPath == "" {
 			*nginxPath = filepath.Join(dir, "nginx.conf")
 		}

@@ -51,10 +51,6 @@ func validReference(repo, ref string) bool {
 	return repositoryPattern.MatchString(repo) && (tagPattern.MatchString(ref) || err == nil)
 }
 
-func download(ctx context.Context, ref name.Reference, dir string) error {
-	return downloadWithConcurrency(ctx, ref, dir, 1)
-}
-
 func downloadWithConcurrency(ctx context.Context, ref name.Reference, dir string, workers int) error {
 	// Separate processes importing into one directory must still run serially.
 	if workers < 1 || workers > maxParallelDownloads {
@@ -106,7 +102,7 @@ func downloadWithConcurrency(ctx context.Context, ref name.Reference, dir string
 		}
 		if task.err == nil {
 			for _, desc := range task.blobs {
-				job := m.blobs[desc.Digest.String()]
+				job := m.blobs[blobKey(desc)]
 				if job.err != nil || job.desc.Size != desc.Size {
 					task.err = fmt.Errorf("incomplete blob %s", desc.Digest)
 					break
@@ -150,16 +146,16 @@ func (m *mirror) path(kind, ref string) string {
 // manifest bookkeeping is never mutated concurrently and workers cannot deadlock
 // while waiting for children in a nested index.
 func (m *mirror) collect(ctx context.Context, ref name.Reference, expected *v1.Descriptor) *manifestTask {
-	if previous, ok := m.manifests[ref.Identifier()]; ok {
-		if expected == nil || previous.desc == nil || sameDescriptor(previous.desc.Descriptor, *expected) {
-			return previous
-		}
-		task := &manifestTask{err: fmt.Errorf("conflicting manifest descriptor: %s", ref)}
-		m.ordered = append(m.ordered, task)
-		return task
+	key := ref.Identifier()
+	if expected != nil {
+		key = fmt.Sprintf("%s/%d/%s", key, expected.Size, expected.MediaType)
+	}
+	if previous, ok := m.manifests[key]; ok {
+		return previous
 	}
 	task := &manifestTask{}
-	m.manifests[ref.Identifier()] = task
+	var doc manifestDocument
+	m.manifests[key] = task
 	task.err = retryDownload(ctx, "manifest "+ref.String(), func() error {
 		var err error
 		task.desc, err = m.puller.Get(ctx, ref)
@@ -169,24 +165,23 @@ func (m *mirror) collect(ctx context.Context, ref name.Reference, expected *v1.D
 		if expected != nil && !sameDescriptor(task.desc.Descriptor, *expected) {
 			return fmt.Errorf("manifest %s does not match index descriptor", ref)
 		}
-		return copyContent(io.Discard, bytes.NewReader(task.desc.Manifest), task.desc.Descriptor)
+		if err := copyContent(io.Discard, bytes.NewReader(task.desc.Manifest), task.desc.Descriptor); err != nil {
+			return err
+		}
+		doc, err = parseManifest(task.desc.Manifest, task.desc.MediaType)
+		return err
 	})
 	if task.err == nil {
-		m.manifests[task.desc.Digest.String()] = task
 		fmt.Fprintf(os.Stderr, "manifest %s\n", ref)
-		var doc manifestDocument
-		doc, task.err = parseManifest(task.desc.Manifest, task.desc.MediaType)
-		if task.err == nil {
-			for _, child := range doc.Manifests {
-				task.children = append(task.children, m.collect(ctx, m.repo.Digest(child.Digest.String()), &child))
-			}
-			task.blobs = doc.blobs()
-			for _, desc := range task.blobs {
-				if _, ok := m.blobs[desc.Digest.String()]; !ok {
-					job := &blobTask{desc: desc}
-					m.blobs[desc.Digest.String()] = job
-					m.jobs = append(m.jobs, job)
-				}
+		for _, child := range doc.Manifests {
+			task.children = append(task.children, m.collect(ctx, m.repo.Digest(child.Digest.String()), &child))
+		}
+		task.blobs = doc.blobs()
+		for _, desc := range task.blobs {
+			if _, ok := m.blobs[blobKey(desc)]; !ok {
+				job := &blobTask{desc: desc}
+				m.blobs[blobKey(desc)] = job
+				m.jobs = append(m.jobs, job)
 			}
 		}
 	}
@@ -200,7 +195,10 @@ func (m *mirror) downloadBlobs(ctx context.Context, workers int) {
 	for range min(workers, len(m.jobs)) {
 		wg.Go(func() {
 			for job := range jobs {
-				job.err = m.blob(ctx, job.desc)
+				job.err = ctx.Err()
+				if job.err == nil {
+					job.err = m.blob(ctx, job.desc)
+				}
 			}
 		})
 	}
@@ -229,4 +227,11 @@ func (m *mirror) blob(ctx context.Context, desc v1.Descriptor) error {
 		fmt.Fprintf(os.Stderr, "blob %s (%d bytes)\n", desc.Digest, desc.Size)
 		return storeContent(path, body, desc)
 	})
+}
+
+// Conflicting sizes must not let one malformed descriptor poison a healthy
+// sibling. Identical descriptors still share one transfer; failed writes are
+// temporary and cannot replace a verified blob at the common digest path.
+func blobKey(desc v1.Descriptor) string {
+	return fmt.Sprintf("%s/%d", desc.Digest, desc.Size)
 }
