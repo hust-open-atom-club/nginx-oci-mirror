@@ -30,7 +30,7 @@ func TestBatchDownload(t *testing.T) {
 	}{
 		{"success custom config", false, false, false, 3},
 		{"success default config", false, false, true, 3},
-		{"stop on download error", true, false, false, 1},
+		{"continue after download error", true, false, false, 2},
 		{"validate before downloading", false, true, false, 0},
 	} {
 		t.Run(check.name, func(t *testing.T) {
@@ -88,7 +88,7 @@ func TestBatchDownload(t *testing.T) {
 			}
 			wantRequests := []string{"/v2/test/image/manifests/one", "/v2/test/image/manifests/two", "/v2/test/image/manifests/three"}
 			if check.missing {
-				wantRequests = wantRequests[:2]
+				wantRequests = []string{wantRequests[0], wantRequests[1], wantRequests[1], wantRequests[1], wantRequests[1], wantRequests[2]}
 				if !strings.Contains(err.Error(), images[1]) {
 					t.Fatalf("error does not identify failed image: %v", err)
 				}
@@ -107,15 +107,15 @@ func TestBatchDownload(t *testing.T) {
 			}
 			for i, tag := range []string{"one", "two", "three"} {
 				path := filepath.Join(dir, "v2", "test", "image", "manifests", tag)
-				if _, err := os.Stat(path); (err == nil) != (i < check.completed) {
+				if _, err := os.Stat(path); (err == nil) != (!check.invalid && (!check.missing || i != 1)) {
 					t.Fatalf("unexpected completion of %s: %v", tag, err)
 				}
-				if check.completed == 3 && !strings.Contains(string(config), "/manifests/"+tag+" {") {
+				if !check.invalid && (!check.missing || i != 1) && !strings.Contains(string(config), "/manifests/"+tag+" {") {
 					t.Fatalf("config is missing image %s", tag)
 				}
 			}
-			if check.completed != 3 && string(config) != previous {
-				t.Fatal("failed batch replaced the previous nginx config")
+			if check.invalid && string(config) != previous {
+				t.Fatal("invalid input replaced the previous nginx config")
 			}
 		})
 	}
