@@ -50,16 +50,20 @@ func TestLocalScanDescriptorIsolation(t *testing.T) {
 	configBytes, layerBytes := []byte("{}"), []byte("shared same-size data")
 	config := scanTestDescriptor(configBytes, types.OCIConfigJSON)
 	layer := scanTestDescriptor(layerBytes, types.OCILayer)
+	var wantSize int64
 	for _, repo := range []string{"review/a", "review/b"} {
 		writeScanTestContent(t, dir, repo, "blobs", config.Digest.String(), configBytes)
 		writeScanTestContent(t, dir, repo, "blobs", layer.Digest.String(), layerBytes)
 		good := writeScanTestManifest(t, dir, repo, "good", config, layer)
+		if repo == "review/a" {
+			wantSize = good.Size + config.Size + layer.Size
+		}
 		badLayer := layer
 		badLayer.Size++
 		bad := writeScanTestManifest(t, dir, repo, "bad", config, badLayer)
 		conflicting := good
 		conflicting.MediaType = types.DockerManifestSchema2
-		raw, err := json.Marshal(manifestDocument{SchemaVersion: 2, MediaType: types.OCIImageIndex, Manifests: []v1.Descriptor{bad, conflicting, good}})
+		raw, err := json.Marshal(v1.IndexManifest{SchemaVersion: 2, MediaType: types.OCIImageIndex, Manifests: []v1.Descriptor{bad, conflicting, good}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -69,7 +73,7 @@ func TestLocalScanDescriptorIsolation(t *testing.T) {
 	}
 	writeScanTestContent(t, dir, "review/b", "blobs", layer.Digest.String(), bytes.Repeat([]byte("x"), len(layerBytes)))
 	for _, workers := range []int{1, 2, 4} {
-		got, err := localManifests(t.Context(), dir, workers, io.Discard)
+		got, total, err := localManifests(t.Context(), dir, workers, io.Discard)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,6 +82,9 @@ func TestLocalScanDescriptorIsolation(t *testing.T) {
 		}
 		if len(got["review/b"]) != 0 {
 			t.Fatalf("corrupt independent repository published: %v", got["review/b"])
+		}
+		if total != wantSize {
+			t.Fatalf("invalid graphs contributed to size: got %d, want %d", total, wantSize)
 		}
 	}
 }
@@ -103,11 +110,14 @@ func TestLocalScanSHA512LegacyHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeScanTestContent(t, dir, repo, "manifests", ".metadata.json", metadata)
-	got, err := localManifests(t.Context(), dir, 4, io.Discard)
+	got, total, err := localManifests(t.Context(), dir, 4, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got[repo]) != 2 || got[repo]["good"].Digest != desc.Digest {
 		t.Fatalf("sha512 legacy hint lost: %v", got)
+	}
+	if want := desc.Size + config.Size + layer.Size; total != want {
+		t.Fatalf("sha512 graph size = %d, want %d", total, want)
 	}
 }

@@ -79,20 +79,26 @@ func runWithOutput(ctx context.Context, args []string, output io.Writer) error {
 		}
 		fmt.Fprintf(output, "Saved %s to %s\n", ref, dir)
 	}
-	if ctx.Err() == nil && (*nginx || *nginxPath != "") {
-		if *nginxPath == "" {
-			*nginxPath = filepath.Join(dir, "nginx.conf")
-		}
-		if err := nginxConfig(ctx, dir, *nginxPath, *verify); err != nil {
-			failures = append(failures, err)
-		}
-	}
 	if err := ctx.Err(); err != nil {
 		failures = append(failures, err)
 	} else {
-		total, err := localMirrorSize(ctx, dir)
+		var total int64
+		var err error
+		if *nginx || *nginxPath != "" {
+			if *nginxPath == "" {
+				*nginxPath = filepath.Join(dir, "nginx.conf")
+			}
+			total, err = nginxConfig(ctx, dir, *nginxPath, *verify, os.Stderr)
+		} else {
+			total, err = localMirrorSize(ctx, dir)
+			if err != nil {
+				err = fmt.Errorf("measure local mirror size: %w", err)
+			}
+		}
 		if err != nil {
-			failures = append(failures, fmt.Errorf("measure local mirror size: %w", err))
+			failures = append(failures, err)
+		} else if err := ctx.Err(); err != nil {
+			failures = append(failures, err)
 		} else if _, err := fmt.Fprintf(output, "Total size is %s\n", formatSize(total)); err != nil {
 			failures = append(failures, err)
 		}

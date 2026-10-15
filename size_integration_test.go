@@ -11,9 +11,10 @@ import (
 	"testing"
 )
 
-// Fixtures below have two-component repository names. Read their actual stored
-// bytes independently of the stat-only implementation under test.
-func storedFixtureBytes(t *testing.T, dir string) int64 {
+// These clean fixtures have two-component repository names and complete graphs.
+// Canonical digest files are exactly their graph backing files; tags/metadata
+// contribute only to the no-nginx directory-size fallback.
+func storedFixtureBytes(t *testing.T, dir string, graphOnly bool) int64 {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(dir, "v2", "*", "*", "*", "*"))
 	if err != nil {
@@ -21,6 +22,9 @@ func storedFixtureBytes(t *testing.T, dir string) int64 {
 	}
 	var total int64
 	for _, path := range paths {
+		if graphOnly && !strings.Contains(filepath.Base(path), ":") {
+			continue
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -58,12 +62,12 @@ func TestRunTotalSize(t *testing.T) {
 				args = append(args, "--nginx-config", filepath.Join(t.TempDir(), "registry.conf"))
 			}
 			args = append(args, dir)
-			for range 2 { // Reusing cached files must still report the full retained size.
+			for range 2 { // Reusing cached files must still report the full total.
 				var output bytes.Buffer
 				if err := runWithOutput(t.Context(), args, &output); err != nil {
 					t.Fatal(err)
 				}
-				assertTotalSizeOutput(t, output.String(), storedFixtureBytes(t, dir))
+				assertTotalSizeOutput(t, output.String(), storedFixtureBytes(t, dir, config != "none"))
 			}
 		})
 	}
@@ -100,13 +104,13 @@ func TestRunTotalSizeAfterFailedSync(t *testing.T) {
 			if err := runWithOutput(t.Context(), []string{"--nginx", "--image-file", input, dir}, &output); err == nil {
 				t.Fatal("download failure was hidden")
 			}
-			assertTotalSizeOutput(t, output.String(), storedFixtureBytes(t, dir))
+			assertTotalSizeOutput(t, output.String(), storedFixtureBytes(t, dir, true))
 		})
 	}
 }
 
 func TestRunDoesNotPrintIncompleteTotal(t *testing.T) {
-	for _, kind := range []string{"invalid arguments", "invalid repository", "invalid tag", "invalid image list", "canceled before run", "canceled during download", "size read error"} {
+	for _, kind := range []string{"invalid arguments", "invalid repository", "invalid tag", "invalid image list", "canceled before run", "canceled during download", "size read error", "config error"} {
 		t.Run(kind, func(t *testing.T) {
 			r := newResilienceRegistry(t)
 			ref := r.tag(t, "size/image", "latest")
@@ -125,6 +129,9 @@ func TestRunDoesNotPrintIncompleteTotal(t *testing.T) {
 			case "invalid image list":
 				input := writeSizeFixture(t, t.TempDir(), "images.txt", "invalid image\n")
 				args = []string{"--image-file", input, dir}
+			case "config error":
+				config := writeSizeFixture(t, dir, "nginx.conf", "user-owned config")
+				args = []string{"--nginx-config", config, ref.String(), dir}
 			case "canceled before run":
 				cancel()
 			case "canceled during download":

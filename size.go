@@ -12,6 +12,52 @@ import (
 	"strings"
 )
 
+// graphSize uses already verified descriptor lengths. Only graphs accepted
+// into the final inventory are added; successful reads from discarded graphs
+// do not contribute. Tags share their canonical manifest's backing path.
+type graphSize struct {
+	files map[string]bool
+	bytes int64
+}
+
+func (size *graphSize) addFile(path string, bytes int64) error {
+	if size.files[path] {
+		return nil
+	}
+	if bytes < 0 || bytes > math.MaxInt64-size.bytes {
+		return fmt.Errorf("invalid total size for %s", path)
+	}
+	size.files[path] = true
+	size.bytes += bytes
+	return nil
+}
+
+func (size *graphSize) addManifest(ctx context.Context, node *localManifest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if size.files[node.path] {
+		return nil
+	}
+	if err := size.addFile(node.path, node.size); err != nil {
+		return err
+	}
+	for _, blob := range node.blobs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := size.addFile(blob.path, blob.desc.Size); err != nil {
+			return err
+		}
+	}
+	for _, child := range node.children {
+		if err := size.addManifest(ctx, child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // localMirrorSize counts retained regular-file lengths, not allocated disk
 // blocks or bytes read during verification. Walking paths counts shared blobs
 // once without following manifest references or reading any file contents.
