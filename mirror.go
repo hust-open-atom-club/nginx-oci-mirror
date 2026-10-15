@@ -39,7 +39,9 @@ func download(ctx context.Context, ref name.Reference, dir string) error {
 	if !validReference(ref.Context().RepositoryStr(), ref.Identifier()) {
 		return fmt.Errorf("invalid repository or reference: %s", ref)
 	}
-	puller, err := remote.NewPuller(remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	puller, err := remote.NewPuller(remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		// Retry whole files, including body reads and integrity checks, exactly four times.
+		remote.WithRetryBackoff(remote.Backoff{Steps: 1}))
 	if err != nil {
 		return err
 	}
@@ -73,14 +75,19 @@ func (m *mirror) path(kind, ref string) string {
 }
 
 func (m *mirror) manifest(ctx context.Context, ref name.Reference, expected *v1.Descriptor) (*remote.Descriptor, error) {
-	desc, err := m.puller.Get(ctx, ref)
+	var desc *remote.Descriptor
+	err := retryDownload(ctx, "manifest "+ref.String(), func() error {
+		var err error
+		desc, err = m.puller.Get(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if expected != nil && (desc.Digest != expected.Digest || desc.Size != expected.Size) {
+			return fmt.Errorf("manifest %s does not match index descriptor", ref)
+		}
+		return copyContent(io.Discard, bytes.NewReader(desc.Manifest), desc.Descriptor)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch manifest %s: %w", ref, err)
-	}
-	if expected != nil && (desc.Digest != expected.Digest || desc.Size != expected.Size) {
-		return nil, fmt.Errorf("manifest %s does not match index descriptor", ref)
-	}
-	if err := copyContent(io.Discard, bytes.NewReader(desc.Manifest), desc.Descriptor); err != nil {
 		return nil, err
 	}
 	if m.seen[desc.Digest.String()] {
@@ -129,15 +136,17 @@ func (m *mirror) blob(ctx context.Context, desc v1.Descriptor) error {
 	if validContent(path, desc) {
 		return nil
 	}
-	layer, err := m.puller.Layer(ctx, m.repo.Digest(desc.Digest.String()))
-	if err != nil {
-		return err
-	}
-	body, err := layer.Compressed()
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-	fmt.Fprintf(os.Stderr, "blob %s (%d bytes)\n", desc.Digest, desc.Size)
-	return storeContent(path, body, desc)
+	return retryDownload(ctx, "blob "+desc.Digest.String(), func() error {
+		layer, err := m.puller.Layer(ctx, m.repo.Digest(desc.Digest.String()))
+		if err != nil {
+			return err
+		}
+		body, err := layer.Compressed()
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+		fmt.Fprintf(os.Stderr, "blob %s (%d bytes)\n", desc.Digest, desc.Size)
+		return storeContent(path, body, desc)
+	})
 }
