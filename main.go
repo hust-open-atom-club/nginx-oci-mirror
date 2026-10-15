@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 )
 
 func run(ctx context.Context, args []string) error {
+	return runWithOutput(ctx, args, os.Stdout)
+}
+
+func runWithOutput(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("tool", flag.ContinueOnError)
 	nginx := flags.Bool("nginx", false, "generate a server include fragment at DIRECTORY/nginx.conf")
 	nginxPath := flags.String("nginx-config", "", "generate a server include fragment at this path")
@@ -54,6 +59,9 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		if !validReference(ref.Context().RepositoryStr(), ref.Identifier()) {
+			return fmt.Errorf("invalid image reference %q", flags.Arg(0))
+		}
 		refs = []name.Reference{ref}
 		dir = flags.Arg(1)
 	}
@@ -69,7 +77,7 @@ func run(ctx context.Context, args []string) error {
 			failures = append(failures, err)
 			continue
 		}
-		fmt.Printf("Saved %s to %s\n", ref, dir)
+		fmt.Fprintf(output, "Saved %s to %s\n", ref, dir)
 	}
 	if ctx.Err() == nil && (*nginx || *nginxPath != "") {
 		if *nginxPath == "" {
@@ -81,6 +89,13 @@ func run(ctx context.Context, args []string) error {
 	}
 	if err := ctx.Err(); err != nil {
 		failures = append(failures, err)
+	} else {
+		total, err := localMirrorSize(ctx, dir)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("measure local mirror size: %w", err))
+		} else if _, err := fmt.Fprintf(output, "Total size is %s\n", formatSize(total)); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	return errors.Join(failures...)
 }
