@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 )
 
 func run(ctx context.Context, args []string) error {
+	return runWithOutput(ctx, args, os.Stdout)
+}
+
+func runWithOutput(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("tool", flag.ContinueOnError)
 	nginx := flags.Bool("nginx", false, "generate a server include fragment at DIRECTORY/nginx.conf")
 	nginxPath := flags.String("nginx-config", "", "generate a server include fragment at this path")
@@ -54,6 +59,9 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		if !validReference(ref.Context().RepositoryStr(), ref.Identifier()) {
+			return fmt.Errorf("invalid image reference %q", flags.Arg(0))
+		}
 		refs = []name.Reference{ref}
 		dir = flags.Arg(1)
 	}
@@ -69,18 +77,31 @@ func run(ctx context.Context, args []string) error {
 			failures = append(failures, err)
 			continue
 		}
-		fmt.Printf("Saved %s to %s\n", ref, dir)
-	}
-	if ctx.Err() == nil && (*nginx || *nginxPath != "") {
-		if *nginxPath == "" {
-			*nginxPath = filepath.Join(dir, "nginx.conf")
-		}
-		if err := nginxConfig(ctx, dir, *nginxPath, *verify); err != nil {
-			failures = append(failures, err)
-		}
+		fmt.Fprintf(output, "Saved %s to %s\n", ref, dir)
 	}
 	if err := ctx.Err(); err != nil {
 		failures = append(failures, err)
+	} else {
+		var total int64
+		var err error
+		if *nginx || *nginxPath != "" {
+			if *nginxPath == "" {
+				*nginxPath = filepath.Join(dir, "nginx.conf")
+			}
+			total, err = nginxConfig(ctx, dir, *nginxPath, *verify, os.Stderr)
+		} else {
+			total, err = localMirrorSize(ctx, dir)
+			if err != nil {
+				err = fmt.Errorf("measure local mirror size: %w", err)
+			}
+		}
+		if err != nil {
+			failures = append(failures, err)
+		} else if err := ctx.Err(); err != nil {
+			failures = append(failures, err)
+		} else if _, err := fmt.Fprintf(output, "Total size is %s\n", formatSize(total)); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	return errors.Join(failures...)
 }

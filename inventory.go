@@ -20,11 +20,14 @@ import (
 // The files on disk are authoritative. Metadata is only a media-type hint for
 // older manifests that omit mediaType; missing or stale metadata cannot hide a
 // valid image or make a broken dependency graph publishable.
-func localManifests(ctx context.Context, dir string, workers int, progress io.Writer) (map[string]map[string]v1.Descriptor, error) {
-	return (&localScan{}).manifests(ctx, dir, workers, progress)
+func localManifests(ctx context.Context, dir string, workers int, progress io.Writer) (map[string]map[string]v1.Descriptor, int64, error) {
+	scan := &localScan{}
+	manifests, err := scan.manifests(ctx, dir, workers, progress)
+	return manifests, scan.totalSize, err
 }
 
 func (scan *localScan) manifests(ctx context.Context, dir string, workers int, progress io.Writer) (result map[string]map[string]v1.Descriptor, err error) {
+	scan.totalSize = 0
 	if workers < 1 || workers > maxParallelVerify {
 		return nil, fmt.Errorf("parallel verification must be between 1 and %d", maxParallelVerify)
 	}
@@ -123,6 +126,7 @@ func (scan *localScan) manifests(ctx context.Context, dir string, workers int, p
 		return nil, err
 	}
 	result = make(map[string]map[string]v1.Descriptor)
+	size := graphSize{files: make(map[string]bool)}
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -135,7 +139,11 @@ func (scan *localScan) manifests(ctx context.Context, dir string, workers int, p
 			result[candidate.repo] = make(map[string]v1.Descriptor)
 		}
 		result[candidate.repo][candidate.ref] = candidate.desc
+		if err := size.addManifest(ctx, candidate.node); err != nil {
+			return nil, err
+		}
 	}
+	scan.totalSize = size.bytes
 	return result, nil
 }
 
@@ -194,6 +202,8 @@ func localDescriptor(root, path, ref string, hint v1.Descriptor) (v1.Descriptor,
 // Graph discovery is serial. Workers only fill localBlob.err, and graph
 // completeness is evaluated after they have all joined.
 type localManifest struct {
+	path      string
+	size      int64
 	err       error
 	validated bool
 	children  []*localManifest
@@ -260,6 +270,7 @@ func (v *localValidator) discover(desc v1.Descriptor, node *localManifest) error
 	if err := copyContent(io.Discard, bytes.NewReader(data), desc); err != nil {
 		return err
 	}
+	node.path, node.size = path, desc.Size
 	doc, err := parseManifest(data, desc.MediaType)
 	if err != nil {
 		return err

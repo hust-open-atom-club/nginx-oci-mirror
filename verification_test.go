@@ -146,7 +146,7 @@ func TestCanceledNginxScanPreservesConfig(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := nginxConfig(ctx, fixture.dir, config, 2); !errors.Is(err, context.Canceled) {
+	if _, err := nginxConfig(ctx, fixture.dir, config, 2, io.Discard); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled scan: %v", err)
 	}
 	got, err := os.ReadFile(config)
@@ -181,7 +181,7 @@ func TestParallelScanConfigStable(t *testing.T) {
 	config := filepath.Join(fixture.dir, "nginx.conf")
 	var previous []byte
 	for _, workers := range []int{1, 2, 4} {
-		if err := nginxConfig(t.Context(), fixture.dir, config, workers); err != nil {
+		if _, err := nginxConfig(t.Context(), fixture.dir, config, workers, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 		data, err := os.ReadFile(config)

@@ -27,6 +27,7 @@ type localScan struct {
 	discovered atomic.Int64
 	checked    atomic.Int64
 	bytes      atomic.Int64
+	totalSize  int64 // Unique files in the final complete graphs, not bytes read.
 }
 
 func (scan *localScan) blob(path string, desc v1.Descriptor) *localBlob {
