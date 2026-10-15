@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -11,6 +12,13 @@ import (
 )
 
 func atomicFile(path string, write func(io.Writer) error) error {
+	return atomicFileContext(context.Background(), path, write)
+}
+
+func atomicFileContext(ctx context.Context, path string, write func(io.Writer) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
@@ -27,6 +35,9 @@ func atomicFile(path string, write func(io.Writer) error) error {
 		return err
 	}
 	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.Rename(f.Name(), path)
